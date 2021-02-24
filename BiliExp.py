@@ -1,11 +1,16 @@
 # -*- coding: utf-8 -*-
-import asyncio, json, time, logging, sys, re, io, os
+import asyncio, time, logging, sys, io, os
+from importlib import import_module
 from collections import OrderedDict
 from getopt import getopt
 from BiliClient import asyncbili
 import tasks
+try:
+    from json5 import loads
+except:
+    from json import loads
 
-main_version = (1, 1, 9)
+main_version = (1, 2, 0)
 main_version_str = '.'.join(map(str, main_version))
 
 def version_compare(version: str):
@@ -58,11 +63,12 @@ def load_config(path: str) -> OrderedDict:
     '''加载配置文件'''
     if path:
         with open(path,'r',encoding='utf-8') as fp:
-            return json.loads(re.sub(r'\/\*[\s\S]*?\*\/', '', fp.read()), object_pairs_hook=OrderedDict)
+            return loads(fp.read(), object_pairs_hook=OrderedDict)
     else:
         for path in ('./config/config.json', './config.json', '/etc/BiliExp/config.json'):
-            with open(path,'r',encoding='utf-8') as fp:
-                return json.loads(re.sub(r'\/\*[\s\S]*?\*\/', '', fp.read()), object_pairs_hook=OrderedDict)
+            if os.path.exists(path):
+                with open(path,'r',encoding='utf-8') as fp:
+                    return loads(fp.read(), object_pairs_hook=OrderedDict)
         raise RuntimeError('未找到配置文件')
 
 async def start(configData: dict):
@@ -100,22 +106,32 @@ async def run_user_tasks(user: dict,           #用户配置
         task_array = [] #存放本账户所有任务
 
         for task in default: #遍历任务列表，把需要运行的任务添加到task_array
-            task_function = getattr(tasks, task, None)
-            if task_function:
-                if task in user["tasks"]:
-                    if isinstance(user["tasks"][task], bool):
-                        if user["tasks"][task]:
-                            task_array.append(task_function(biliapi))
-                    elif isinstance(user["tasks"][task], dict):
-                        if 'enable' in user["tasks"][task] and user["tasks"][task]["enable"]:
-                            task_array.append(task_function(biliapi, user["tasks"][task]))
-                else:
-                    if isinstance(default[task], bool):
-                        if default[task]:
-                            task_array.append(task_function(biliapi))
-                    elif isinstance(default[task], dict):
-                        if 'enable' in default[task] and default[task]["enable"]:
-                            task_array.append(task_function(biliapi, default[task]))
+
+            try:
+                task_module = import_module(f'tasks.{task}') #加载任务模块
+            except ModuleNotFoundError:
+                logging.error(f'{biliapi.name}: 未找到任务模块{task}')
+                continue
+
+            task_function = getattr(task_module, task, None)
+            if not task_function:
+                logging.error(f'{biliapi.name}: 未找到任务{task}的入口函数')
+                continue
+
+            if task in user["tasks"]:
+                if isinstance(user["tasks"][task], bool):
+                    if user["tasks"][task]:
+                        task_array.append(task_function(biliapi))
+                elif isinstance(user["tasks"][task], dict):
+                    if 'enable' in user["tasks"][task] and user["tasks"][task]["enable"]:
+                        task_array.append(task_function(biliapi, user["tasks"][task]))
+            else:
+                if isinstance(default[task], bool):
+                    if default[task]:
+                        task_array.append(task_function(biliapi))
+                elif isinstance(default[task], dict):
+                    if 'enable' in default[task] and default[task]["enable"]:
+                        task_array.append(task_function(biliapi, default[task]))
 
         if task_array:
             await asyncio.wait(task_array)        #异步等待所有任务完成
@@ -134,7 +150,7 @@ def main(*args, **kwargs):
 
     #启动任务
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(asyncio.wait([start(configData)]))
+    loop.run_until_complete(start(configData))
 
 if __name__=="__main__":
     kwargs = {}
